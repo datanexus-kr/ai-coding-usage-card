@@ -73,7 +73,7 @@ const toolDailyOf = (cmd) => {
     const out = {};
     for (const x of d.daily || []) {
       const c = x.costUSD ?? x.totalCost ?? 0;
-      if (c > 0) out[x.period] = c;
+      if (c > 0) out[x.period ?? x.date] = c;
     }
     return out;
   } catch { return {}; }
@@ -133,11 +133,14 @@ const mergeToolDaily = (oldTD = {}, newTD = {}) => {
 
 // v1 -> v2 migration (one-time): fold the old cumulative per-tool total into a
 // fixed legacy bucket, since v1 snapshots have no day-level tool breakdown.
+const oldLastPeriod = (old?.daily || []).reduce((m, d) => (d.period > m ? d.period : m), '');
+const upToOldLedger = (days = {}) =>
+  Object.fromEntries(Object.entries(days).filter(([p]) => !oldLastPeriod || p <= oldLastPeriod));
 const toolLegacy = old?.toolDaily
   ? (old.toolLegacy || {})
   : Object.fromEntries((old?.tools || [])
       .filter(([name]) => name !== 'Claude Code')
-      .map(([name, cost]) => [name, Math.max(0, cost - sumValues(newToolDaily[name] || {}))]));
+      .map(([name, cost]) => [name, Math.max(0, cost - sumValues(upToOldLedger(newToolDaily[name])))]));
 
 const mergedDaily = mergeDaily(old?.daily, local.daily);
 const mergedToolDaily = mergeToolDaily(old?.toolDaily, newToolDaily);
