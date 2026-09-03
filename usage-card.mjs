@@ -215,6 +215,23 @@ const pct = (c) => { const p = (c / usd) * 100; return p >= 1 ? `${p.toFixed(0)}
 const daysActive = daily.length;
 const avgDay = dailyTotals.totalCost / Math.max(daysActive, 1);
 const peak = daily.reduce((a, d) => (d.totalCost > a.totalCost ? d : a), daily[0]);
+
+// Optional account split for the full card, in case the same machine's logs
+// span more than one billing account:
+//   USAGE_CARD_ACCOUNT_SPLIT="YYYY-MM-DD:before-label:after-label"
+// Days before the date fall to the first label, the rest to the second.
+const accounts = (() => {
+  const spec = process.env.USAGE_CARD_ACCOUNT_SPLIT;
+  if (!spec) return [];
+  const [date, before, after] = spec.split(':');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || !before || !after) return [];
+  const bucket = new Map([[before, 0], [after, 0]]);
+  for (const d of daily) {
+    const k = d.period < date ? before : after;
+    bucket.set(k, bucket.get(k) + (d.totalCost || 0));
+  }
+  return [...bucket].filter(([, c]) => c > 0);
+})();
 const cacheShare = ((dailyTotals.cacheReadTokens / dailyTotals.totalTokens) * 100).toFixed(1);
 
 const modelCost = {};
@@ -298,22 +315,26 @@ const grass = (weeks, x0, y0, withLegend = true, legendY = null) => {
 
 // ─── variant: FULL (846x225) ───
 const buildFull = () => {
-  const W = 846, H = 225;
+  const W = 846, H = accounts.length ? 252 : 225;
   const cols = [30, 235, 465, 665], dividers = [215, 445, 645];
   const col3 = [['Output', fmtTok(dailyTotals.outputTokens)], ['Input', fmtTok(dailyTotals.inputTokens)], ['Cache read', fmtTok(dailyTotals.cacheReadTokens)], ['Cache write', fmtTok(dailyTotals.cacheCreationTokens)]]
     .map(([l, v], i) => row(cols[2], 98 + i * 25, l, v, 630)).join('');
   const col4 = [['Active days', String(daysActive)], ['Avg / day', `$ ${int(avgDay)}`], ['Peak day', `$ ${int(peak.totalCost)}`], ['Top model', prettyModel(topModelId)]]
     .map(([l, v], i) => row(cols[3], 98 + i * 25, l, v, 816)).join('');
-  const toolLine = tools
+  const splitLine = (pairs) => pairs
     .map(([n, c]) => `<tspan class="lbl">${n}</tspan> <tspan class="val">$ ${fmtCost(c)}</tspan><tspan class="foot"> (${pct(c)})</tspan>`)
     .join('<tspan class="foot">&#160;&#160;&#183;&#160;&#160;</tspan>');
+  const toolLine = splitLine(tools);
+  const acctRow = accounts.length
+    ? `\n<g class="fade" style="animation-delay:900ms"><text x="30" y="232" class="hdr">BY ACCOUNT</text><text x="130" y="232">${splitLine(accounts)}</text></g>`
+    : '';
   return frame(W, H, `${header(W)}
 ${dividers.map((x) => `<line x1="${x}" y1="62" x2="${x}" y2="178" stroke="#262626" stroke-width="1"/>`).join('')}
 <g class="fade" style="animation-delay:150ms">${allTimeBlock(cols[0], 72, 135)}</g>
 <g class="fade" style="animation-delay:300ms"><text x="${cols[1]}" y="72" class="hdr">COST</text>${costRows(cols[1], 98, 25, 430)}</g>
 <g class="fade" style="animation-delay:450ms"><text x="${cols[2]}" y="72" class="hdr">TOKEN MIX</text>${col3}</g>
 <g class="fade" style="animation-delay:600ms"><text x="${cols[3]}" y="72" class="hdr">ACTIVITY</text>${col4}</g>
-<g class="fade" style="animation-delay:750ms"><text x="30" y="205" class="hdr">BY TOOL</text><text x="110" y="205">${toolLine}</text></g>`);
+<g class="fade" style="animation-delay:750ms"><text x="30" y="205" class="hdr">BY TOOL</text><text x="130" y="205">${toolLine}</text></g>${acctRow}`);
 };
 
 // ─── variant: HALF (423x195 — two side by side = one full width) ───
