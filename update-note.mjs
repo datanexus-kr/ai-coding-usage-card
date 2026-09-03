@@ -116,5 +116,7 @@ const payload = JSON.stringify({
   content: Buffer.from(next, 'utf8').toString('base64'),
   sha: meta.sha,
 });
-sh(`printf '%s' ${JSON.stringify(payload)} | "${GH}" api -X PUT "repos/${REPO}/contents/README.md" --input -`);
+// Pass the payload on stdin, never through the shell: a literal `$9,635` in
+// the commit message would otherwise expand as a positional parameter.
+execSync(`"${GH}" api -X PUT "repos/${REPO}/contents/README.md" --input -`, { input: payload, encoding: 'utf8', windowsHide: true });
 console.log(`[note] updated: ${tok(tokens)} tokens, ${usd(cost)}`);
