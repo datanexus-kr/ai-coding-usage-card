@@ -108,6 +108,74 @@ A scheduler (Task Scheduler / cron / launchd) runs the script once a day. Each r
    37 9 * * * USAGE_CARD_REPO=YOURNAME/YOURNAME USAGE_CARD_DEVICE=macbook-work /usr/local/bin/node /path/to/usage-card.mjs >> /path/to/usage-card.log 2>&1
    ```
 
+## GitHub account selection
+
+The publisher selects the stored GitHub account named by `USAGE_CARD_GITHUB_USER`
+(defaults to the repository owner). Both card and usage-note updates use that
+account, regardless of the active `gh` account or inherited `GH_TOKEN` /
+`GITHUB_TOKEN`. For an organization repository, set this variable to a personal
+account with write access. It must already be logged in via `gh auth login`.
+The job checks repository write access before collecting usage and fails with
+the selected account name if access is missing. It does not switch the global
+GitHub account.
+
+Run regression checks with `node --test github-client.test.mjs usage-insights.test.mjs`.
+
+## Daily usage note and curation insights
+
+`run-daily.sh` publishes the cards, then runs `update-note.mjs`. The note keeps
+the usage summary and adds 2–3 short cost insights with inline links to at least two
+published DataNexus curations. Each run reads the live Hugo search index, selects
+up to six recent cost/token/cache articles by title and summary, and supplies
+their full text to the writer. New published articles enter the selection
+automatically; local drafts and unpublished changes are never used.
+
+The writer uses the installed, authenticated Claude CLI in non-interactive
+safe mode with no tools or session persistence. It first produces insights
+with verifiable source excerpts, then performs a separate editing pass using
+the installed `junho-humanizer/SKILL.md` and citation rules. The skill's Python
+linters check the result: numbers, dates, URLs and code must be preserved, and
+no mandatory `FIX` findings may remain. A separate claim review checks the draft
+and edited insights against the usage summary and cited articles; unsupported
+claims or an incomplete review block publication. Source text is treated as data, not
+instructions. Insights distinguish observations from proposed checks and must
+not equate API-equivalent cost or cache-read token share with actual bills,
+savings, productivity, or request-level cache hit rate.
+
+Each insight starts with a short conclusion followed by one or two plain-language
+sentences. Independent points default to a numbered list; simple collections
+can use bullets, and connected explanations can use paragraphs. The draft JSON
+records this choice as `format: numbered | bullets | paragraphs`. The renderer
+adds list markers and blank lines between items. Both writing passes explain
+technical terms on first use and avoid repeating the usage summary or billing
+caveats. The existing usage-summary generator remains unchanged, and the editing
+pass leaves its text intact.
+
+Validation accepts all three formats, checks source excerpts and per-item links,
+and preserves actual numbers, dollar amounts and percentages. List markers such
+as `1.` and `2.` are excluded from numeric checks only after their structure is
+validated; changing a real value or moving it to another item still fails.
+
+Requirements: an authenticated `claude`, Python 3, and the `junho-humanizer`
+skill. Settings:
+
+- `USAGE_CARD_CURATION_INDEX`: defaults to `https://datanexus-kr.github.io/index.json`.
+- `USAGE_CARD_HUMANIZER_DIR`: defaults to `~/.codex/skills/junho-humanizer`.
+- `CLAUDE_PATH`: defaults to `~/.local/bin/claude`.
+- `PYTHON_PATH`: defaults to `python3`.
+
+Preview with `USAGE_CARD_REPO=datanexus-kr/datanexus-kr node update-note.mjs --dry-run`.
+The generated draft, edited Markdown, source excerpts and validation results
+are saved under ignored `out/usage-note-*` files. Identical inputs reuse a
+validated cached result; changed usage, published articles, implementation or skill rules
+trigger fresh generation. The writer gets at most one repair attempt per stage.
+If fetching, generation, or validation fails, the previous README stays in
+place and the job exits with an error; card publication is independent.
+The README update replaces only the marked usage-note section.
+
+The installed macOS LaunchAgent runs `run-daily.sh` daily at 09:40 local time.
+Its log is `~/Library/Logs/ai-usage-card/run.log`.
+
 ## Multiple computers
 
 Repeat the clone, test, and scheduling steps on each computer with a unique `USAGE_CARD_DEVICE`, such as `macbook-work`, `macbook-home`, or `desktop-windows`. Each run merges into that device's own snapshot (never another device's), then rebuilds the cards from every device snapshot, so scheduled reruns do not duplicate usage.

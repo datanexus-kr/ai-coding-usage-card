@@ -2,23 +2,23 @@
 // Rewrites the "사용량 노트" section of the profile README from the committed
 // device ledgers, so the prose never drifts from the cards.
 // Run after usage-card.mjs. Requires: Node 18+, GitHub CLI (`gh auth login`).
-import { execSync } from 'node:child_process';
+import { createGitHubClient } from './github-client.mjs';
+import { buildEnrichedNote, replaceUsageNote } from './usage-insights.mjs';
 
 const REPO = process.env.USAGE_CARD_REPO;
 const GH = process.env.GH_PATH ?? 'gh';
 const DRY_RUN = process.argv.includes('--dry-run');
 if (!REPO) throw new Error('Set USAGE_CARD_REPO, e.g. octocat/octocat');
 
-const sh = (cmd, big = false) =>
-  execSync(cmd, { encoding: 'utf8', maxBuffer: (big ? 128 : 32) * 1024 * 1024, windowsHide: true });
-const api = (path, big = false) => JSON.parse(sh(`"${GH}" api "${path}"`, big));
+const { api, assertWriteAccess } = createGitHubClient({ repo: REPO, gh: GH });
+await assertWriteAccess();
 const b64 = (s) => Buffer.from(s, 'base64').toString('utf8');
 
 // --- collect every device ledger ---
-const tree = api(`repos/${REPO}/git/trees/main?recursive=1`, true);
-const ledgers = tree.tree
+const tree = await api(`repos/${REPO}/git/trees/main?recursive=1`);
+const ledgers = await Promise.all(tree.tree
   .filter((x) => x.type === 'blob' && x.path.startsWith('cards/devices/') && x.path.endsWith('.json'))
-  .map((x) => JSON.parse(b64(api(`repos/${REPO}/git/blobs/${x.sha}`, true).content)));
+  .map(async (x) => JSON.parse(b64((await api(`repos/${REPO}/git/blobs/${x.sha}`)).content))));
 if (!ledgers.length) throw new Error('no device ledgers found');
 
 const daily = new Map();
@@ -93,22 +93,21 @@ const topModel = rank(models)[0];
 const claudeTop = rank(models).find(([n]) => n.startsWith('claude'));
 const [rec1, rec2] = rank(recent);
 
-const note = `### 사용량 노트 <sub>${last} 기준</sub>
+const usageNote = `### 사용량 노트 <sub>${last} 기준</sub>
 
-${mon(first)}${part(first)}부터 ${span()} 달 동안 AI 코딩 도구로 ${tok(tokens)} 토큰을 태웠다. API 정가로 환산하면 ${usd(cost)}인데 ${(cacheRead / tokens * 100).toFixed(1)}%가 캐시에서 읽은 토큰이라 실제 결제액이 아니라 환산치다.
+${mon(first)}${part(first)}부터 ${span()} 달 동안 AI 코딩 도구로 ${tok(tokens)} 토큰을 태웠다. API 정가로 환산한 비용은 ${usd(cost)}로 실제 결제액과는 다르다. 전체 토큰의 ${(cacheRead / tokens * 100).toFixed(1)}%를 캐시에서 읽었다.
 
 툴별로는 ${tool1[0]} ${usd(tool1[1])}, ${tool2[0]} ${usd(tool2[1])} 순이고 Gemini는 ${gemini < 10 ? '써본 수준이다' : `${usd(gemini)} 정도다`}. 모델로 좁히면 ${topModel[0]} 하나가 ${usd(topModel[1])}으로 ${topModel[1] / cost > 0.4 ? '절반 가까이' : '가장 많이'} 가져간다. Claude 쪽은 ${claudeTop[0]}가 ${usd(claudeTop[1])}까지 올라왔다.
 
-${mon(peakMonth[0])}이 ${usd(peakMonth[1])}로 월 최고였고 ${lastFull ? `${mon(lastFull[0])}은 ${usd(lastFull[1])}로 ${lastFull[1] < peakMonth[1] ? '꺾였다' : '더 올라갔다'}` : '아직 집계 중이다'}. 하루 최고 기록은 ${mon(peak.period)}${part(peak.period)}의 ${usd(peak.totalCost)}. 최근 30일만 떼어 보면 ${rec1[0]} ${usd(rec1[1])}, ${rec2[0]} ${usd(rec2[1])}로 ${rec1[0] === tool1[0] ? '순서가 그대로다' : '순서가 뒤집혔다'}.
+${mon(peakMonth[0])}이 ${usd(peakMonth[1])}로 월 최고였고 ${lastFull ? `${mon(lastFull[0])}은 ${usd(lastFull[1])}로 ${lastFull[1] < peakMonth[1] ? '꺾였다' : '더 올라갔다'}` : '아직 집계 중이다'}. 하루 최고 기록은 ${mon(peak.period)}${part(peak.period)}의 ${usd(peak.totalCost)}이다. 최근 30일만 떼어 보면 ${rec1[0]} ${usd(rec1[1])}, ${rec2[0]} ${usd(rec2[1])}로 ${rec1[0] === tool1[0] ? '순서가 그대로다' : '순서가 뒤집혔다'}.
 `;
 
+const { note, insights } = await buildEnrichedNote(usageNote);
 if (DRY_RUN) { console.log(note); process.exit(0); }
 
-const meta = api(`repos/${REPO}/contents/README.md`);
+const meta = await api(`repos/${REPO}/contents/README.md`);
 const readme = b64(meta.content);
-const re = /### 사용량 노트[\s\S]*?(?=\n### |\n## |$)/;
-if (!re.test(readme)) throw new Error('"### 사용량 노트" section not found in README.md');
-const next = readme.replace(re, note);
+const next = replaceUsageNote(readme, note);
 if (next === readme) { console.log(`[note] no change`); process.exit(0); }
 
 const payload = JSON.stringify({
@@ -116,7 +115,6 @@ const payload = JSON.stringify({
   content: Buffer.from(next, 'utf8').toString('base64'),
   sha: meta.sha,
 });
-// Pass the payload on stdin, never through the shell: a literal `$9,635` in
-// the commit message would otherwise expand as a positional parameter.
-execSync(`"${GH}" api -X PUT "repos/${REPO}/contents/README.md" --input -`, { input: payload, encoding: 'utf8', windowsHide: true });
-console.log(`[note] updated: ${tok(tokens)} tokens, ${usd(cost)}`);
+// Send JSON directly so currency strings are never expanded by a shell.
+await api(`repos/${REPO}/contents/README.md`, { method: 'PUT', body: payload });
+console.log(`[note] updated: ${tok(tokens)} tokens, ${usd(cost)}, ${insights.insights.length} curation insights, humanizer checks passed`);

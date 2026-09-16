@@ -11,7 +11,9 @@
 // Requirements: Node 18+, GitHub CLI (`gh auth login`), npx.
 // https://github.com/Baek-Seunghyun/ai-coding-usage-card
 import { execSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { createGitHubClient } from './github-client.mjs';
 
 // ─────────────────────────── CONFIG ───────────────────────────
 const CONFIG = {
@@ -21,6 +23,15 @@ const CONFIG = {
   device: process.env.USAGE_CARD_DEVICE,
   // Directory inside that repo where the SVGs are committed.
   dir: 'cards',
+  // Local high-water archive of every snapshot this machine publishes. The
+  // published ledger is the only copy the generator reads back, so anything
+  // that republishes from a shorter history — an older revision of this
+  // script, a run whose ccusage logs have been pruned — silently shrinks the
+  // ALL-TIME total for good. The archive is folded back in on every run so the
+  // next run heals a truncated ledger instead of inheriting it.
+  // Resolved against this script, not the cwd: a run started from anywhere else
+  // must not silently miss the archive and republish a short ledger.
+  ledgerDir: process.env.USAGE_CARD_LEDGER_DIR ?? fileURLToPath(new URL('./ledger-history', import.meta.url)),
   // Extra currencies next to USD (any codes from open.er-api.com).
   currencies: [['KRW', '₩'], ['EUR', '€'], ['CNY', '¥']],
   // Executables. Plain names work when PATH is set; Windows scheduled
@@ -39,6 +50,7 @@ const NPX = CONFIG.npx;
 const GH = CONFIG.gh;
 const A = CONFIG.accent;
 const DEVICE = CONFIG.device;
+const LEDGER_DIR = CONFIG.ledgerDir;
 const GRASS_RAMP = ['#1b1b1b', '#0e4429', '#006d32', '#26a641', '#39d353'];
 const DRY_RUN = process.argv.includes('--dry-run');
 
@@ -51,18 +63,8 @@ if (!DEVICE || !/^[a-z0-9][a-z0-9_-]*$/i.test(DEVICE))
   throw new Error('Set USAGE_CARD_DEVICE to a stable unique name, e.g. macbook-work');
 const USER = '@' + REPO.split('/')[0];
 
-const token = sh(`"${GH}" auth token`).trim();
-const api = (url, opts = {}) =>
-  fetch(`https://api.github.com/${url}`, {
-    ...opts,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json',
-      'Content-Type': 'application/json',
-      ...opts.headers,
-    },
-  });
-const j = async (r) => { if (!r.ok) throw new Error(`${r.status} ${await r.text()}`); return r.json(); };
+const { api, assertWriteAccess } = createGitHubClient({ repo: REPO, gh: GH });
+await assertWriteAccess();
 
 // --- usage data (this device, from local ccusage logs) ---
 const local = JSON.parse(sh(`"${NPX}" -y ccusage@latest --json`, true));
@@ -81,15 +83,19 @@ const toolDailyOf = (cmd) => {
 const newToolDaily = { Codex: toolDailyOf('codex'), Gemini: toolDailyOf('gemini'), Copilot: toolDailyOf('copilot') };
 
 // --- fetch existing device snapshots ---
-const ref = await j(await api(`repos/${REPO}/git/ref/heads/main`));
-const baseCommit = await j(await api(`repos/${REPO}/git/commits/${ref.object.sha}`));
-const repoTree = await j(await api(`repos/${REPO}/git/trees/${baseCommit.tree.sha}?recursive=1`));
+const ref = await api(`repos/${REPO}/git/ref/heads/main`);
+const baseCommit = await api(`repos/${REPO}/git/commits/${ref.object.sha}`);
+const repoTree = await api(`repos/${REPO}/git/trees/${baseCommit.tree.sha}?recursive=1`);
 const entries = repoTree.tree.filter((x) => x.type === 'blob' && x.path.startsWith(`${DIR}/devices/`) && x.path.endsWith('.json'));
 const snapshots = await Promise.all(entries.map(async ({ sha }) => {
-  const blob = await j(await api(`repos/${REPO}/git/blobs/${sha}`));
+  const blob = await api(`repos/${REPO}/git/blobs/${sha}`);
   return JSON.parse(Buffer.from(blob.content, 'base64').toString('utf8'));
 }));
 const old = snapshots.find((x) => x.device === DEVICE);
+
+// --- local high-water archive (see CONFIG.ledgerDir) ---
+const ARCHIVE = `${LEDGER_DIR}/${DEVICE}.json`;
+const archive = existsSync(ARCHIVE) ? JSON.parse(readFileSync(ARCHIVE, 'utf8')) : null;
 
 // --- high-water merge: this device's stored ledger vs the fresh local read ---
 const sum = (items, key) => items.reduce((n, x) => n + (x[key] || 0), 0);
@@ -131,19 +137,39 @@ const mergeToolDaily = (oldTD = {}, newTD = {}) => {
   return merged;
 };
 
+// The ledger we merge against: the published snapshot healed with whatever the
+// local archive still remembers. A published snapshot that has lost days (or
+// was written by a pre-v2 revision, which has no day-level tool ledger at all)
+// gets topped back up here instead of dragging the totals down.
+const maxByKey = (a = {}, b = {}) => Object.fromEntries(
+  [...new Set([...Object.keys(a), ...Object.keys(b)])].map((k) => [k, Math.max(a[k] || 0, b[k] || 0)]));
+const stored = !archive ? old : !old ? archive : {
+  version: 2,
+  daily: mergeDaily(archive.daily, old.daily),
+  toolDaily: mergeToolDaily(archive.toolDaily, old.toolDaily),
+  toolLegacy: maxByKey(archive.toolLegacy, old.toolDaily ? old.toolLegacy : archive.toolLegacy),
+  ...((old.baseline ?? archive.baseline) ? { baseline: old.baseline ?? archive.baseline } : {}),
+};
+if (archive && old) {
+  const lostDays = (archive.daily || []).length - (old.daily || []).length;
+  const lostCost = sum(archive.daily || [], 'totalCost') - sum(old.daily || [], 'totalCost');
+  if (lostDays > 0 || lostCost > 1)
+    console.warn(`warning: published ledger (v${old.version ?? 1}) is behind the local archive by ${lostDays} day(s) / $${lostCost.toFixed(0)} — healing from the archive`);
+}
+
 // v1 -> v2 migration (one-time): fold the old cumulative per-tool total into a
 // fixed legacy bucket, since v1 snapshots have no day-level tool breakdown.
-const oldLastPeriod = (old?.daily || []).reduce((m, d) => (d.period > m ? d.period : m), '');
+const oldLastPeriod = (stored?.daily || []).reduce((m, d) => (d.period > m ? d.period : m), '');
 const upToOldLedger = (days = {}) =>
   Object.fromEntries(Object.entries(days).filter(([p]) => !oldLastPeriod || p <= oldLastPeriod));
-const toolLegacy = old?.toolDaily
-  ? (old.toolLegacy || {})
-  : Object.fromEntries((old?.tools || [])
+const toolLegacy = stored?.toolDaily
+  ? (stored.toolLegacy || {})
+  : Object.fromEntries((stored?.tools || [])
       .filter(([name]) => name !== 'Claude Code')
       .map(([name, cost]) => [name, Math.max(0, cost - sumValues(upToOldLedger(newToolDaily[name])))]));
 
-const mergedDaily = mergeDaily(old?.daily, local.daily);
-const mergedToolDaily = mergeToolDaily(old?.toolDaily, newToolDaily);
+const mergedDaily = mergeDaily(stored?.daily, local.daily);
+const mergedToolDaily = mergeToolDaily(stored?.toolDaily, newToolDaily);
 const snapTotals = Object.fromEntries(totalKeys.map((k) => [k, sum(mergedDaily, k)]));
 const snapshot = {
   version: 2,
@@ -153,8 +179,30 @@ const snapshot = {
   daily: mergedDaily,
   toolDaily: mergedToolDaily,
   toolLegacy,
-  ...(old?.baseline ? { baseline: old.baseline } : {}),
+  ...(stored?.baseline ? { baseline: stored.baseline } : {}),
 };
+
+// --- regression guard ---
+// Backstop assertion, not the main defence: the archive fold above is what
+// actually heals a truncated ledger. Every merge here is a high-water mark, so
+// a smaller snapshot than the stored one means that invariant has been broken
+// — a bad merge, a half-read ledger, a device-name mismatch. Publishing it
+// would overwrite the longer ledger with the shorter one, which is exactly how
+// the ALL-TIME total has been lost before. Stop instead.
+const storedTotals = Object.fromEntries(totalKeys.map((k) => [k, sum(stored?.daily || [], k)]));
+const regressions = [
+  ['days', (stored?.daily || []).length, mergedDaily.length],
+  ...totalKeys.map((k) => [k, storedTotals[k], snapTotals[k]]),
+].filter(([, was, now]) => now < was - 1e-6);
+if (regressions.length && !process.argv.includes('--allow-regression'))
+  throw new Error(`refusing to publish a smaller ledger than the stored one (${
+    regressions.map(([k, was, now]) => `${k} ${Math.round(was)} -> ${Math.round(now)}`).join(', ')
+  }). The published snapshot or the local archive knows more than this run can see; recover it before republishing, or pass --allow-regression if the drop is intended.`);
+
+if (!DRY_RUN) {
+  mkdirSync(LEDGER_DIR, { recursive: true });
+  writeFileSync(ARCHIVE, JSON.stringify(snapshot, null, 2) + '\n');
+}
 
 const current = snapshots.findIndex((x) => x.device === DEVICE);
 if (current < 0) snapshots.push(snapshot); else snapshots[current] = snapshot;
@@ -389,19 +437,19 @@ if (DRY_RUN) {
   console.log(`[dry-run] [${new Date().toISOString()}] ${snapshots.length} device(s), 5 cards + snapshot written to ./out/: ${fmtTok(headlineTotals.totalTokens)} tokens | $${int(usd)} | ${tools.map(([n, c]) => `${n} $${fmtCost(c)}`).join(' | ')}`);
 } else {
   const treeItems = files.map(([path, content]) => ({ path, mode: '100644', type: 'blob', content }));
-  const tree = await j(await api(`repos/${REPO}/git/trees`, {
+  const tree = await api(`repos/${REPO}/git/trees`, {
     method: 'POST',
     body: JSON.stringify({ base_tree: baseCommit.tree.sha, tree: treeItems }),
-  }));
-  const commit = await j(await api(`repos/${REPO}/git/commits`, {
+  });
+  const commit = await api(`repos/${REPO}/git/commits`, {
     method: 'POST',
     body: JSON.stringify({
       message: `Update AI usage cards: ${fmtTok(headlineTotals.totalTokens)} tokens, $${int(usd)}`,
       tree: tree.sha,
       parents: [ref.object.sha],
     }),
-  }));
-  await j(await api(`repos/${REPO}/git/refs/heads/main`, { method: 'PATCH', body: JSON.stringify({ sha: commit.sha }) }));
+  });
+  await api(`repos/${REPO}/git/refs/heads/main`, { method: 'PATCH', body: JSON.stringify({ sha: commit.sha }) });
 
   console.log(`[${new Date().toISOString()}] ${snapshots.length} device(s), 5 cards updated @ ${commit.sha.slice(0, 7)}: ${fmtTok(headlineTotals.totalTokens)} tokens | $${int(usd)} | ${tools.map(([n, c]) => `${n} $${fmtCost(c)}`).join(' | ')}`);
 }
