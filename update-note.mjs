@@ -135,7 +135,7 @@ const monthFlow = lastFull
 
 const usageNote = `### 사용량 노트 <sub>${last} 기준</sub>
 
-${mon(first)}${part(first)}부터 ${span()} 달 동안 AI 코딩 도구로 ${tokKr(tokens)} 토큰을 썼다. API 정가로 환산한 비용은 ${usdWon(cost)}${josa(cost)}, 정액 구독(Claude Max 등) 요금제라면 실제 결제액은 이보다 적다. 전체 토큰의 ${(cacheRead / tokens * 100).toFixed(1)}%를 캐시에서 읽었다.
+${mon(first)}${part(first)}부터 ${span()} 달 동안 AI 코딩 도구로 ${tokKr(tokens)} 토큰을 썼다. API 정가로 환산한 비용은 ${usdWon(cost)}${josa(cost)}, 정액 구독(Claude Max 등)으로 쓰고 있어 실제 결제액은 이보다 적다. 전체 토큰의 ${(cacheRead / tokens * 100).toFixed(1)}%를 캐시에서 읽었다.
 
 도구별로는 ${tool1[0]} ${usdWon(tool1[1])}, ${tool2[0]} ${usdWon(tool2[1])} 순으로 ${tool1[0]}가 ${tool2[0]}의 ${(tool1[1] / tool2[1]).toFixed(1)}배다. Gemini는 ${gemini > 0 ? `약 ${usdWon(gemini)}이다` : '쓰지 않았다'}. 모델별로는 ${topModel[0]}가 ${usdWon(topModel[1])}${josa(topModel[1])} ${topModelShare}. Claude 쪽은 ${claudeTop[0]}가 ${usdWon(claudeTop[1])}이다.
 
