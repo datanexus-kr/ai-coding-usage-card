@@ -55,12 +55,12 @@ test('legacy migration and repeated updates preserve profile content outside the
   const before = '## Hi there\n\n<img src="card.svg" />\n\n';
   const after = '## Projects\n\nMy project\n';
   const old = `${before}### 사용량 노트 <sub>어제</sub>\n\nOld note\n\n${after}`;
-  const first = replaceUsageNote(old, note + '\n#### 비용 인사이트\n\nInsights\n');
-  const second = replaceUsageNote(first, note + '\n#### 비용 인사이트\n\nNew insights\n');
+  const first = replaceUsageNote(old, note + '\n#### 참고\n\nInsights\n');
+  const second = replaceUsageNote(first, note + '\n#### 참고\n\nNew insights\n');
   assert.ok(second.startsWith(before));
   assert.ok(second.endsWith(after));
   assert.equal((second.match(/usage-note:start/g) || []).length, 1);
-  assert.equal((second.match(/#### 비용 인사이트/g) || []).length, 1);
+  assert.equal((second.match(/#### 참고/g) || []).length, 1);
   assert.ok(!second.includes('Old note'));
   assert.ok(!second.includes('\nInsights\n'));
 });
@@ -136,7 +136,7 @@ for (const format of ['paragraphs', 'bullets', 'numbered']) {
 test('only list markers are stripped; real numbers and units are still protected', () => {
   assert.equal(stripListMarkers('1. $100, 90%, 30일\n2. gpt-5.5\n3. 2배'), '$100, 90%, 30일\ngpt-5.5\n2배');
   const input = valid();
-  const draft = note.trim() + '\n\n#### 비용 인사이트\n\n' + renderInsights(input) + '\n';
+  const draft = note.trim() + '\n\n#### 참고\n\n' + renderInsights(input) + '\n';
   const check = (final) => validatePolishedInsights(draft, final, input, sources, note);
   assert.doesNotThrow(() => check(draft));
   assert.throws(() => check(draft.replace('1. ', '9. ')), /consecutive|format/);

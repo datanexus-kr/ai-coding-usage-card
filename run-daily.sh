@@ -9,7 +9,7 @@ export USAGE_CARD_REPO="datanexus-kr/datanexus-kr"
 export USAGE_CARD_GITHUB_USER="datanexus-kr"
 export USAGE_CARD_DEVICE="macbookpro"
 export USAGE_CARD_CURATION_INDEX="https://datanexus-kr.github.io/index.json"
-export USAGE_CARD_HUMANIZER_DIR="$HOME/.codex/skills/junho-humanizer"
+export USAGE_CARD_HUMANIZER_DIR="$HOME/.codex/skills/juno-humanizer"
 # Codex plan_type flipped prolite -> team on 2026-07-29, and the active Claude
 # Code credential was created the same morning. Days before that are personal.
 export USAGE_CARD_ACCOUNT_SPLIT="2026-07-29:personal:work"

@@ -78,8 +78,37 @@ const recent = toolCost(since);
 
 const usd = (n) => '$' + Math.round(n).toLocaleString('en-US');
 const tok = (n) => (n >= 1e9 ? (n / 1e9).toFixed(1) + 'B' : (n / 1e6).toFixed(0) + 'M');
+// Korean-prose token count (억/만) instead of the English B/M shorthand.
+const tokKr = (n) => (n >= 1e8 ? `${Math.round(n / 1e8)}억` : `${Math.round(n / 1e4)}만`);
 const mon = (p) => Number(p.slice(5, 7)) + '월';
-const part = (p) => { const d = +p.slice(8, 10); return d <= 10 ? '초' : d <= 20 ? ' 중순' : ' 말'; };
+const day = (p) => Number(p.slice(8, 10));
+const dateKr = (p) => `${mon(p)} ${day(p)}일`;
+
+// Historical USD→KRW rate for one date (ECB reference rate via Frankfurter).
+// Network hiccups must never block the note: fall back to no parenthetical.
+async function fxRate(dateStr) {
+  try {
+    const res = await fetch(`https://api.frankfurter.app/${dateStr}?from=USD&to=KRW`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return typeof data.rates?.KRW === 'number' ? data.rates.KRW : null;
+  } catch {
+    return null;
+  }
+}
+const rate = await fxRate(last);
+const peakRate = peak.period === last ? rate : await fxRate(peak.period);
+const krw = (n, r) => (r ? ` (₩${Math.round(n * r).toLocaleString('en-US')})` : '');
+// usd() amount plus its day's KRW equivalent in parentheses; defaults to the note's
+// reference-date rate, with peakRate passed explicitly for the single-day record.
+const usdWon = (n, r = rate) => `${usd(n)}${krw(n, r)}`;
+const part = (p) => { const d = day(p); return d <= 10 ? '초' : d <= 20 ? ' 중순' : ' 말'; };
+// '으로'/'로' depends on the batchim of the number's last spoken syllable. In this
+// range (dollars, no cents) a units digit of 0/1/3/6/7/8 always lands on a batchim
+// syllable (직접 자릿수 또는 십/백/천/만 같은 자릿수 단위 모두 받침으로 끝난다).
+const josa = (n) => ([0, 1, 3, 6, 7, 8].includes(Math.abs(Math.round(n)) % 10) ? '으로' : '로');
+const daysInMonth = (p) => new Date(Number(p.slice(0, 4)), Number(p.slice(5, 7)), 0).getDate();
+const monthKr = (p) => (p === last.slice(0, 7) && day(last) < daysInMonth(p) ? `${mon(p)}(${day(last)}일까지)` : mon(p));
 const span = () => {
   const [y1, m1] = first.split('-').map(Number), [y2, m2] = last.split('-').map(Number);
   const n = (y2 - y1) * 12 + (m2 - m1);
@@ -93,13 +122,24 @@ const topModel = rank(models)[0];
 const claudeTop = rank(models).find(([n]) => n.startsWith('claude'));
 const [rec1, rec2] = rank(recent);
 
+// 연결어미('-고') 뒤에는 쉼표를 두지 않는다(humanizer COMMA_CONN 규칙) — 두 문장으로 끊는다.
+const topModelShare = topModel[1] / cost > 0.4 ? '절반 가까이 차지한다' : '가장 많다';
+const currentMonth = last.slice(0, 7);
+const currentCost = months.get(currentMonth) || 0;
+const isCurrentPeak = peakMonth[0] === currentMonth;
+const monthFlow = lastFull
+  ? isCurrentPeak
+    ? `${mon(lastFull[0])}은 ${usdWon(lastFull[1])}였다. ${monthKr(currentMonth)}은 ${usdWon(currentCost)}${josa(currentCost)} 가장 많다.`
+    : `${mon(lastFull[0])}은 ${usdWon(lastFull[1])}였다. ${monthKr(currentMonth)}은 ${usdWon(currentCost)}이다. 월 최고 기록은 ${mon(peakMonth[0])}의 ${usdWon(peakMonth[1])}이다.`
+  : `${monthKr(currentMonth)}이 ${usdWon(currentCost)}${josa(currentCost)} 가장 많다.`;
+
 const usageNote = `### 사용량 노트 <sub>${last} 기준</sub>
 
-${mon(first)}${part(first)}부터 ${span()} 달 동안 AI 코딩 도구로 ${tok(tokens)} 토큰을 태웠다. API 정가로 환산한 비용은 ${usd(cost)}로 실제 결제액과는 다르다. 전체 토큰의 ${(cacheRead / tokens * 100).toFixed(1)}%를 캐시에서 읽었다.
+${mon(first)}${part(first)}부터 ${span()} 달 동안 AI 코딩 도구로 ${tokKr(tokens)} 토큰을 썼다. API 정가로 환산한 비용은 ${usdWon(cost)}${josa(cost)}, 정액 구독(Claude Max 등) 요금제라면 실제 결제액은 이보다 적다. 전체 토큰의 ${(cacheRead / tokens * 100).toFixed(1)}%를 캐시에서 읽었다.
 
-툴별로는 ${tool1[0]} ${usd(tool1[1])}, ${tool2[0]} ${usd(tool2[1])} 순이고 Gemini는 ${gemini < 10 ? '써본 수준이다' : `${usd(gemini)} 정도다`}. 모델로 좁히면 ${topModel[0]} 하나가 ${usd(topModel[1])}으로 ${topModel[1] / cost > 0.4 ? '절반 가까이' : '가장 많이'} 가져간다. Claude 쪽은 ${claudeTop[0]}가 ${usd(claudeTop[1])}까지 올라왔다.
+도구별로는 ${tool1[0]} ${usdWon(tool1[1])}, ${tool2[0]} ${usdWon(tool2[1])} 순으로 ${tool1[0]}가 ${tool2[0]}의 ${(tool1[1] / tool2[1]).toFixed(1)}배다. Gemini는 ${gemini > 0 ? `약 ${usdWon(gemini)}이다` : '쓰지 않았다'}. 모델별로는 ${topModel[0]}가 ${usdWon(topModel[1])}${josa(topModel[1])} ${topModelShare}. Claude 쪽은 ${claudeTop[0]}가 ${usdWon(claudeTop[1])}이다.
 
-${mon(peakMonth[0])}이 ${usd(peakMonth[1])}로 월 최고였고 ${lastFull ? `${mon(lastFull[0])}은 ${usd(lastFull[1])}로 ${lastFull[1] < peakMonth[1] ? '꺾였다' : '더 올라갔다'}` : '아직 집계 중이다'}. 하루 최고 기록은 ${mon(peak.period)}${part(peak.period)}의 ${usd(peak.totalCost)}이다. 최근 30일만 떼어 보면 ${rec1[0]} ${usd(rec1[1])}, ${rec2[0]} ${usd(rec2[1])}로 ${rec1[0] === tool1[0] ? '순서가 그대로다' : '순서가 뒤집혔다'}.
+월별로는 ${monthFlow} 하루 최고 기록은 ${dateKr(peak.period)}의 ${usdWon(peak.totalCost, peakRate)}이다. 최근 30일 기준으로도 ${rec1[0]} ${usdWon(rec1[1])}, ${rec2[0]} ${usdWon(rec2[1])}${josa(rec2[1])} 도구별 순위는 ${rec1[0] === tool1[0] ? '동일하다' : '달라졌다'}.
 `;
 
 const { note, insights } = await buildEnrichedNote(usageNote);
